@@ -53,15 +53,34 @@ Gotcha we already hit once: if the region doesn't match where the bucket
 actually lives, every request fails. `aws s3api head-bucket --bucket <name>`
 prints the true region.
 
-## 2. Running the migration
+## 2. Running the migration — registry first, upload second
+
+The recommended workflow writes and reviews the registry **before any byte
+is uploaded**. Scan and upload are separate commands sharing one registry
+file, so the review pause can last minutes or days — the only rule is to
+use the same `--db` throughout.
 
 ```bash
-python -m s3migrate dry-run     # 1) see exactly what would happen — uploads NOTHING
-python -m s3migrate upload --batch-files 10    # 2) small pilot
-python -m s3migrate status                     # 3) check the result
-python -m s3migrate upload --batch-files 0     # 4) the full run
-python -m s3migrate verify --full --sample-hash 25   # 5) final sign-off
+# STEP 1 — write the registry + mapping. Uploads NOTHING, touches no S3:
+python -m s3migrate dry-run                    # = scan + dry-run-manifest.csv
+
+# STEP 2 — review (all read-only):
+python -m s3migrate status                     # counts per state
+python -m s3migrate list-files --path 'photos/'
+open dry-run-manifest.csv                      # every file -> exact s3:// key
+#   ...or browse registry.sqlite3 in TablePlus (SELECT * FROM registry)
+# Wrong mapping? fix S3_PREFIX / add --exclude in .env, re-run STEP 1 —
+# rows are updated in place, newly excluded files retire to 'missing'.
+
+# STEP 3 — commit to the work, only when the mapping looks right:
+python -m s3migrate upload --batch-files 10    # pilot
+python -m s3migrate upload --batch-files 0     # the full run
+python -m s3migrate verify --full --sample-hash 25   # final sign-off
 ```
+
+Credentials aren't even exercised until STEP 3's preflight. The gap between
+scan and upload is safe: upload re-stats every file first, so anything that
+changed since the review is caught and re-marked rather than trusted.
 
 (macOS shortcuts: `make dry-run`, `make upload ARGS='--batch-files 0'`,
 `make status`, `make verify ARGS='--full --sample-hash 25'`. The `make

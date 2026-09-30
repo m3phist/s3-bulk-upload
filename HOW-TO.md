@@ -110,6 +110,30 @@ scan doubles as the first step of the real migration: `upload` picks up
 exactly where the scan left off, and files already registered aren't
 re-hashed or re-examined beyond a stat.
 
+### Scan → review → then commit (the recommended order)
+
+This preview isn't just for curiosity — it's the first step of the real
+run. Write the registry, review the mapping, and only then upload:
+
+```bash
+python -m s3migrate dry-run --db registry.sqlite3        # 1) registry + manifest, no uploads
+python -m s3migrate status  --db registry.sqlite3        # 2) review...
+#    dry-run-manifest.csv / list-files / TablePlus on registry.sqlite3
+python -m s3migrate upload  --db registry.sqlite3 --batch-files 10   # 3) commit: pilot
+python -m s3migrate upload  --db registry.sqlite3 --batch-files 0    #    then all
+```
+
+- **Same `--db` at every step** — that's what carries the reviewed mapping
+  into the upload.
+- Nothing before `upload` touches S3 or even exercises the credentials;
+  every file just sits as `discovered` with its future `s3_uri` computed.
+- To change the mapping during review, edit `S3_PREFIX` (or add
+  `--exclude` patterns) and re-run step 1: existing rows are updated in
+  place, newly excluded files retire to `missing`. No duplicates — file
+  identity is the relative path.
+- Days may pass between review and upload: `upload` re-stats everything
+  first, so files changed in the meantime are re-marked, not trusted.
+
 ## 4. Parallel runs — what's supported
 
 **Within one run: yes, parallelism is built in.** `--max-workers N`
