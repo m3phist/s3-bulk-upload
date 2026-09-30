@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.lock
+s3migrate-*.log
+dry-run-manifest.csv
+verify-exceptions.csv
+poc-manifest.csv
+poc-exceptions.csv
+registry-export.csv
+.pytest_cache/
