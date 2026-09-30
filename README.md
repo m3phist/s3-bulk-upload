@@ -8,6 +8,9 @@ modifies anything, on the drive or in the bucket.
 
 Runs on macOS, Linux, and **Windows** (the 1 TB run targets a Windows PC).
 
+Hands-on recipes — external drive vs local folder, mac vs Windows, parallel
+runs, crash recovery, resuming — live in **[HOW-TO.md](HOW-TO.md)**.
+
 ---
 
 ## 1. Getting started
