@@ -207,9 +207,42 @@ Tables behind the view: `sources` (drive identity), `directories`
 (hierarchy, empty-dir flags), `files` (one row per file: path, size,
 mtime, SHA-256, S3 reference, status), `special_entries` (symlinks etc.),
 `upload_jobs`, `upload_attempts`. Schema: `s3migrate/migrations/0001_initial.sql`.
-File statuses: `discovered → uploading → uploaded → verified`, plus
-`failed` (retryable), `changed` (source modified → re-verify), `missing`
-(gone from source).
+
+### File status lifecycle
+
+Every file row moves through this state machine; each transition is
+committed to SQLite the moment it happens:
+
+```
+                 scan                upload worker
+  (new file) ──────────► discovered ────► uploading ────► uploaded ────► VERIFIED
+                                              │               │             │
+                              error ──► failed ◄── verify failed     stays; skipped
+                                              │                      by future runs
+                                    retried next run
+                                                                          │
+  source file modified (size/mtime moved) ──────── changed ◄──────────────┘
+  source file deleted or newly excluded ────────── missing (retired, kept for audit)
+```
+
+| Status | Kind | Meaning |
+|---|---|---|
+| `discovered` | waiting | Scanned and mapped; upload not attempted yet |
+| `uploading` | transient | Transfer in progress right now (or was, when a crash hit) |
+| `uploaded` | transient | Bytes reached S3; checksum/size verification not yet passed |
+| `verified` | **terminal** | Uploaded **and** verified — never re-sent while the source file is unchanged |
+| `failed` | retryable | Any error (collision, network, verify mismatch, changed-during-read); retried automatically next run |
+| `changed` | retryable | Source file's size/mtime moved after it was registered — verification wiped, re-uploaded next run |
+| `missing` | retired | File vanished from the source (or became excluded); kept for the audit trail, never uploaded; revived as `changed` if it reappears |
+
+Two practical consequences:
+
+- In a healthy run `uploading`/`uploaded` show **0** in `status` — files
+  pass through them in seconds and don't accumulate. Nonzero after a crash
+  just means "was in flight"; the next run re-processes those from scratch.
+- `verified` is the only state trusted as done, and only together with an
+  unchanged size+mtime. That's the rule that makes every run a resume and
+  keeps interrupted work from ever being mistaken for finished work.
 
 ## 6. What "intact" means here
 

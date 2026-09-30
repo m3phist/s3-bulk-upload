@@ -217,6 +217,26 @@ python -m s3migrate list-files --status failed
 
 `status` and `list-files` are read-only — safe while an upload is running.
 
+### Reading the status output
+
+Files flow `discovered → uploading → uploaded → verified`, with three side
+tracks: `failed` (any error — retried automatically next run), `changed`
+(source file modified — re-uploaded next run), `missing` (gone from the
+source or newly excluded — retired, never uploaded).
+
+- **`verified` is the only terminal, trusted state** — those files are
+  never re-sent while their size+mtime are unchanged. A completed
+  migration is simply: everything in `verified`, everything else 0.
+- **`uploading`/`uploaded` showing 0 is normal and good** — they're
+  transient waypoints files pass through in seconds. You only see them
+  nonzero mid-run or after a crash, meaning "was in flight"; the next run
+  re-processes exactly those.
+- Rescans (including `dry-run`) never demote `verified` — an unchanged
+  file keeps its status forever. Only a real content change, deletion, or
+  a failed re-verification moves it.
+
+The full state diagram and per-status table are in README §5.
+
 **Resuming on a different machine / OS** (e.g. scanned on the Mac, real run
 on the Windows PC): copy this folder *including the registry file and its
 `-wal`/`-shm` sidecars*, plug in the drive, set `SOURCE_DIR` to the new
