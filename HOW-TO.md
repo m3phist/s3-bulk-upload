@@ -60,11 +60,57 @@ Identical — the source is just a directory:
     --source C:\Users\me\Projects\archive --prefix archive-2026 --batch-files 0
 ```
 
-Give each distinct source its **own `--db` and its own `--prefix`** (see §3).
+Give each distinct source its **own `--db` and its own `--prefix`** (see §4).
 `--exclude` keeps noise out: `--exclude .git --exclude node_modules
 --exclude '*.tmp'` (patterns match any folder/file name or relative path).
 
-## 3. Parallel runs — what's supported
+## 3. Preview the structure without uploading anything
+
+You don't need to run anything end to end to learn what's on the drive.
+`scan` walks the source and fills the registry only — it reads directory
+entries, never file contents, and **never touches the network**, so even a
+1 TB drive takes minutes (bounded by drive seek speed):
+
+```bash
+# macOS/Linux — throwaway preview registry, no uploads:
+python -m s3migrate scan --db registry-preview.sqlite3 --source /Volumes/MyDrive
+```
+```powershell
+# Windows:
+.\.venv\Scripts\python -m s3migrate scan --db registry-preview.sqlite3 --source E:\
+```
+
+It prints file/dir/byte counts and an extension breakdown immediately.
+`dry-run` (same flags) additionally writes `dry-run-manifest.csv` with the
+exact destination key for every file — good for eyeballing in a spreadsheet.
+
+Then explore the registry:
+
+```bash
+python -m s3migrate list-files --db registry-preview.sqlite3 --path 'photos/' --ext jpg
+```
+
+or in SQL (sqlite3 shell, or TablePlus → SQLite → pick the file):
+
+```sql
+-- size and file count per directory
+SELECT COALESCE(NULLIF(d.relpath,''),'(root)') AS directory,
+       COUNT(f.id) AS files,
+       printf('%.2f MiB', SUM(f.size)/1048576.0) AS size
+FROM directories d LEFT JOIN files f ON f.directory_id = d.id
+GROUP BY d.id ORDER BY SUM(f.size) DESC;
+
+-- heaviest folders / biggest files on a large drive
+SELECT directory, COUNT(*) FROM registry GROUP BY directory ORDER BY 2 DESC LIMIT 20;
+SELECT relpath, size FROM registry ORDER BY size DESC LIMIT 20;
+```
+
+Delete `registry-preview.sqlite3*` when done — or skip `--db` so the same
+scan doubles as the first step of the real migration: `upload` picks up
+exactly where the scan left off, and files already registered aren't
+re-hashed or re-examined beyond a stat.
+
+## 4. Parallel runs — what's supported
 
 **Within one run: yes, parallelism is built in.** `--max-workers N`
 (default 4) uploads N files concurrently, and each large file additionally
@@ -92,7 +138,7 @@ collisions instead of overwriting them (safe, but all you get is noise).
 To go faster on one drive, raise `--max-workers`; the bottleneck is almost
 always the drive or the uplink, not the process count.
 
-## 4. If the computer crashes (or sleeps, or the drive unplugs)
+## 5. If the computer crashes (or sleeps, or the drive unplugs)
 
 Nothing needs rescuing. Every state change is committed to SQLite the
 moment it happens, so after a crash the registry is an honest snapshot:
@@ -123,7 +169,7 @@ What to know:
   the source, then re-run upload with `--overwrite` only for true
   mismatches. Cheaper: just back the registry up now and then.
 
-## 5. How to resume
+## 6. How to resume
 
 ```bash
 ./.venv/bin/python -m s3migrate resume --batch-files 0        # macOS/Linux
