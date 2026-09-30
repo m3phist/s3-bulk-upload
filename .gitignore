@@ -1,0 +1,7 @@
+.env
+.venv/
+journal.sqlite3*
+migrate-*.log
+reconcile-exceptions.csv
+manifest*.csv
+__pycache__/
