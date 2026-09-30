@@ -66,7 +66,8 @@ def scan(repo, settings, self_paths=frozenset()):
     source = repo.get_or_create_source(root, os.stat(root).st_dev)
     source_id = source["id"]
     counters = {"files": 0, "bytes": 0, "new": 0, "changed": 0, "dirs": 0,
-                "empty_dirs": 0, "symlinks": 0, "errors": 0}
+                "empty_dirs": 0, "symlinks": 0, "errors": 0, "missing": 0}
+    repo.begin_scan_tracking()
 
     root_dir_id = repo.upsert_directory(source_id, "", None, False)
     stack = [(root, "", root_dir_id)]
@@ -134,4 +135,5 @@ def scan(repo, settings, self_paths=frozenset()):
             counters["empty_dirs"] += 1
             repo.mark_directory_empty(dir_id)
 
+    counters["missing"] = repo.finish_scan_tracking(source_id)
     return source_id, counters

@@ -26,6 +26,7 @@ class Repository:
         self.conn = db.connect(path)
         db.migrate(self.conn)
         self.lock = threading.Lock()
+        self._scan_tracking = False
 
     # -- sources -----------------------------------------------------
 
@@ -81,16 +82,21 @@ class Repository:
                     "VALUES (?,?,?,?,?,?,?,?,?,?, 'discovered', ?)",
                     (source_id, directory_id, relpath, filename, extension,
                      size, mtime_ns, s3_bucket, s3_key, s3_uri, _now()))
+                self._note_seen(cur.lastrowid)
                 self.conn.commit()
                 return cur.lastrowid, "discovered", True
             if row["size"] == size and row["mtime_ns"] == mtime_ns:
-                # metadata unchanged — refresh mapping, keep status
+                # metadata unchanged — refresh mapping, keep status; a row
+                # previously retired as 'missing' has reappeared: re-upload it
+                status = "changed" if row["status"] == "missing" else row["status"]
                 self.conn.execute(
                     "UPDATE files SET directory_id=?, s3_bucket=?, s3_key=?, "
-                    "s3_uri=?, updated_at=? WHERE id=?",
-                    (directory_id, s3_bucket, s3_key, s3_uri, _now(), row["id"]))
+                    "s3_uri=?, status=?, updated_at=? WHERE id=?",
+                    (directory_id, s3_bucket, s3_key, s3_uri, status, _now(),
+                     row["id"]))
+                self._note_seen(row["id"])
                 self.conn.commit()
-                return row["id"], row["status"], False
+                return row["id"], status, False
             self.conn.execute(
                 "UPDATE files SET directory_id=?, size=?, mtime_ns=?, "
                 "sha256=NULL, verified_at=NULL, s3_bucket=?, s3_key=?, "
@@ -98,8 +104,37 @@ class Repository:
                 "WHERE id=?",
                 (directory_id, size, mtime_ns, s3_bucket, s3_key, s3_uri,
                  _now(), row["id"]))
+            self._note_seen(row["id"])
             self.conn.commit()
             return row["id"], "changed", False
+
+    # -- scan tracking: retire rows that vanish from the source -------
+
+    def _note_seen(self, file_id):
+        if self._scan_tracking:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO temp.scan_seen VALUES (?)", (file_id,))
+
+    def begin_scan_tracking(self):
+        with self.lock:
+            self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS scan_seen "
+                              "(file_id INTEGER PRIMARY KEY)")
+            self.conn.execute("DELETE FROM temp.scan_seen")
+            self._scan_tracking = True
+
+    def finish_scan_tracking(self, source_id):
+        """Mark rows this scan did not see (deleted from the drive, or newly
+        excluded) as 'missing' — not uploadable, kept for the audit trail.
+        Returns how many were retired."""
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE files SET status='missing', updated_at=? "
+                "WHERE source_id=? AND status != 'missing' "
+                "AND id NOT IN (SELECT file_id FROM temp.scan_seen)",
+                (_now(), source_id))
+            self.conn.commit()
+            self._scan_tracking = False
+            return cur.rowcount
 
     def set_file_status(self, file_id, status, error=None, sha256=None,
                         verified=False):

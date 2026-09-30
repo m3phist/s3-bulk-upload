@@ -108,6 +108,33 @@ def test_rescan_is_idempotent_and_detects_change(repo, settings, drive):
     assert updated["sha256"] is None and updated["verified_at"] is None
 
 
+def test_vanished_file_retired_and_revived(repo, settings, drive):
+    source_id, _ = scan(repo, settings)
+    target = drive / "rootfile.txt"
+    content = target.read_bytes()
+    st = target.stat()
+
+    target.unlink()
+    _, counters = scan(repo, settings)
+    assert counters["missing"] == 1
+    row = repo.list_files(source_id=source_id, name_like="rootfile")[0]
+    assert row["status"] == "missing"
+
+    # newly-excluded rows are retired the same way
+    _, counters = scan(repo, settings)
+    settings.excludes = ["photos"]
+    _, counters = scan(repo, settings)
+    assert counters["missing"] == 1
+    settings.excludes = []
+
+    # the file coming back (same bytes/mtime) must be re-uploaded, not trusted
+    target.write_bytes(content)
+    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+    _, counters = scan(repo, settings)
+    row = repo.list_files(source_id=source_id, name_like="rootfile")[0]
+    assert row["status"] == "changed"
+
+
 def test_upsert_file_returns_same_row(repo, settings, drive):
     source_id, _ = scan(repo, settings)
     before = repo.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]

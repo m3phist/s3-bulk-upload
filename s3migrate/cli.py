@@ -91,7 +91,7 @@ def parse_args(argv):
     sp.add_argument("--ext", help="extension, e.g. pdf")
     sp.add_argument("--status", choices=["discovered", "pending", "uploading",
                                          "uploaded", "verified", "failed",
-                                         "changed"])
+                                         "changed", "missing"])
     sp.add_argument("--min-size", type=int)
     sp.add_argument("--max-size", type=int)
     sp.add_argument("--limit", type=int, default=100)
@@ -138,7 +138,8 @@ def print_scan_summary(repo, source_id, counters):
           f"({counters['bytes'] / MiB:,.1f} MiB) in {counters['dirs']:,} dirs; "
           f"{counters['new']:,} new, {counters['changed']:,} changed, "
           f"{counters['empty_dirs']} empty dirs, "
-          f"{counters['symlinks']} symlinks, {counters['errors']} errors")
+          f"{counters['symlinks']} symlinks, {counters['errors']} errors, "
+          f"{counters['missing']} gone from source")
     print("top extensions:")
     for ext, count, size in repo.extension_breakdown(source_id, 12):
         print(f"  {ext:>10}: {count:>6,} files  {size / MiB:>10.1f} MiB")
@@ -151,7 +152,7 @@ def print_status(repo, source_id, as_json=False):
         return
     total = {"files": 0, "bytes": 0}
     for state in ("verified", "uploaded", "uploading", "pending", "discovered",
-                  "changed", "failed"):
+                  "changed", "failed", "missing"):
         info = counts.get(state, {"files": 0, "bytes": 0})
         total["files"] += info["files"]
         total["bytes"] += info["bytes"]
@@ -285,7 +286,7 @@ def main(argv=None):
             return 1
         remaining = sum(v["files"] for k, v in
                         repo.status_counts(source_id).items()
-                        if k != "verified")
+                        if k not in ("verified", "missing"))
         if remaining == 0:
             print("all files verified — run `verify --full` before sign-off")
         return 0
