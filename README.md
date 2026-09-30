@@ -1,100 +1,163 @@
-# External drive → S3 migration
+# s3migrate — external drive → S3, with a queryable registry
 
-Resumable, journaled, copy-only migration of an external hard drive into S3,
-preserving the drive's file hierarchy 1:1 as object keys. Implements
-`s3_external_drive_migration_proposal.md`.
+Resumable, journaled, **copy-only** migration of an external hard drive into
+S3, preserving the drive's hierarchy 1:1 as object keys, backed by a SQLite
+metadata registry that downstream tools (or an AI bot) can query for every
+file's S3 reference. Runs on **macOS, Linux, and Windows**.
 
-- `upload.py` — bounded-batch uploader with SQLite journal, collision
-  protection, checksum verification, dry-run, single-instance lock.
-- `reconcile.py` — independent source↔destination manifest comparison
-  (does not trust the journal).
-- `.env` — the five `STORAGE_*` settings plus optional `SOURCE_DIR`/`S3_PREFIX`
-  defaults. Gitignored; template in `.env.example`.
-- `journal.sqlite3` — upload journal (WAL mode). Lives here, **not on the
-  drive**. Gitignored. Back it up occasionally (`cp journal.sqlite3 ~/...`).
-
-Everything runs from the bundled venv: `./.venv/bin/python`.
-(Re-create it with `python3 -m venv .venv && ./.venv/bin/pip install boto3`.)
-
-## Guarantees and scope
-
-Copy-only: the source is never modified, destination objects are never
-deleted. "Intact" means **regular-file bytes + exact relative paths**. Empty
-directories, symlinks (reported, not followed), permissions, timestamps,
-xattrs, and resource forks are *not* preserved — per the proposal, out of
-scope unless separately requested. macOS junk (`.DS_Store`, `._*`,
-`.Spotlight-V100`, …) is excluded on both sides.
-
-## Journal states
-
-`discovered → uploading → uploaded → verified`, or `failed` (with error text,
-retried on the next run). A file is skipped on later runs only when it is
-`verified` **and** its size + mtime are unchanged. Unfinished
-`uploading`/`uploaded` entries are re-processed. The journal records the
-migration ID, source root, bucket, and prefix; running against a different
-source/bucket/prefix aborts unless `--force-source` (or use a new `--journal`).
-
-## Phase 1 — pilot
-
-```bash
-cd ~/redsquare/dch/dch-scripts/s3-bulk-upload
-# 1. plug in drive; set SOURCE_DIR (and a dedicated S3_PREFIX) in .env
-./.venv/bin/python upload.py --dry-run                  # mapping + size estimate
-./.venv/bin/python upload.py --batch-files 10           # 10-file pilot
-./.venv/bin/python upload.py --report                   # inspect journal
-aws s3 ls s3://<bucket>/<prefix>/ --recursive | head    # eyeball keys
+```
+s3migrate/            the package (python -m s3migrate <command>)
+  config.py           .env + settings; credentials never persisted or logged
+  db.py               SQLite connection + plain-SQL migrations
+  migrations/         numbered schema files (0001_initial.sql, ...)
+  repository.py       ALL SQL lives here — swap for psycopg to go Postgres
+  scanner.py          streaming discovery (no in-memory tree)
+  s3io.py             client factory, checksum semantics
+  uploader.py         bounded-batch multipart uploads + verification
+  verifier.py         HEAD re-verification and full reconciliation
+  cli.py, locking.py  subcommands, cross-platform single-instance lock
+tests/                pytest unit + moto-mocked S3 integration suite
 ```
 
-Spot-check nested paths, Unicode names, spaces, zero-byte files, and one
-file ≥ 64 MiB (multipart).
+## Scope of "intact"
 
-## Phase 2 — controlled migration
+Regular-file **bytes + exact relative paths, filenames and case**. S3 keys are
+always `/`-separated regardless of the scanning OS. Represented explicitly:
 
-```bash
-caffeinate -i ./.venv/bin/python upload.py --batch-files 0   # run to completion
-# or repeated bounded batches (default 100 newly verified files per run):
-caffeinate -i ./.venv/bin/python upload.py
-```
+- **Empty directories** — recorded in the registry (`directories.is_empty`);
+  not materialised in S3 by default, or as zero-byte `path/` marker objects
+  with `--dir-markers`.
+- **Symlinks** — recorded in `special_entries` with their target; never
+  followed, never uploaded (S3 has no symlink concept).
+- Permissions/xattrs/timestamps beyond mtime: not preserved (out of scope).
+- macOS junk (`.DS_Store`, `._*`, `.Spotlight-V100`…) and Windows junk
+  (`$RECYCLE.BIN`, `System Volume Information`, `Thumbs.db`…) are excluded.
 
-- Interrupt anytime (Ctrl-C, network drop, drive unplug) — re-running resumes.
-  File-level resume: an interrupted large file restarts from byte 0.
-- A second concurrent instance against the same journal is refused (flock).
-- Systemic failures (bad credentials, missing bucket, drive disconnected)
-  stop the run; per-file failures are journaled and retried next run.
-- Batch = *newly verified files*, not attempts or bytes (proposal §5).
+Copy-only: the source is never modified; destination objects are never
+deleted, and a destination key this registry did not create fails the file
+("collision") instead of being overwritten — use a dedicated `S3_PREFIX`, or
+`--overwrite` after approval.
 
-Defaults: 4 workers, 64 MiB multipart threshold/parts,
-`--verify checksum` — local SHA-256 journaled for every file; single-part
-uploads compared against S3's stored SHA-256; multipart uploads are
-part-level SHA-256-validated by S3 in transit (composite checksum recorded).
-`--verify readback` additionally downloads and re-hashes every object
-(strongest, costs egress). `--verify size` is sizes only.
+## Setup
 
-Collision policy (proposal §6): if a destination key already exists and this
-journal didn't create it, the file is marked `failed` — never silently
-overwritten. Use a dedicated `S3_PREFIX`, or `--overwrite` after approval.
-
-## Phase 3 — reconciliation & sign-off
-
-Freeze writes to the drive, then:
+**macOS / Linux**
 
 ```bash
-./.venv/bin/python upload.py --batch-files 0        # final sweep: must end clean
-./.venv/bin/python reconcile.py --manifest manifest-final.csv --sample-hash 25
+cd dch-scripts/s3-bulk-upload
+make install                 # python3 -m venv .venv + deps
+cp .env.example .env         # fill in the STORAGE_* values
+make test
 ```
 
-`reconcile.py` walks the source and lists the bucket independently, compares
-keys + sizes both directions (missing / size-mismatch / unexpected), optionally
-read-back-hashes a random sample, writes `reconcile-exceptions.csv`, and exits
-non-zero on any discrepancy. Sign off only on exit 0; keep the drive until a
-restore test passes.
+**Windows** (PowerShell; needs Python 3.11+ from python.org)
 
-## Recovery
+```powershell
+cd dch-scripts\s3-bulk-upload
+py -m venv .venv
+.\.venv\Scripts\pip install -r requirements-dev.txt
+copy .env.example .env       # fill in; SOURCE_DIR=E:\ style paths
+.\.venv\Scripts\python -m pytest tests -q
+```
 
-| Problem | Action |
-|---|---|
-| Run interrupted | Just re-run — journal resumes |
-| Drive letter/mount changed | Re-mount at the same path, or `--force-source` after checking it's the same drive |
-| Journal lost/corrupt | Restore your backup copy, or start a fresh journal — `verified` state rebuilds naturally (existing identical objects will report as collisions; verify with `reconcile.py`, then `--overwrite` only for true mismatches) |
-| Stale multipart parts | `aws s3api list-multipart-uploads --bucket <b>`; abort old ones, or add a lifecycle rule aborting incomplete uploads after 7 days |
-| Credentials expired | Fix `.env`, re-run |
+On Windows there is no `make`; call the CLI directly with
+`.\.venv\Scripts\python -m s3migrate <command>` wherever the docs say
+`make <target>`. Everything below is OS-neutral: the registry stores
+`/`-separated relative paths, so a registry begun on one OS resumes on
+another as long as the drive mounts with the same content.
+
+## CLI
+
+```
+python -m s3migrate scan       # discover into the registry; prints counts + extensions
+python -m s3migrate dry-run    # scan + full key-mapping manifest CSV; uploads nothing
+python -m s3migrate upload     # scan, then upload a batch (default 100 newly verified)
+python -m s3migrate resume     # alias of upload — every run resumes
+python -m s3migrate status     # per-status counts, failures, symlinks/specials
+python -m s3migrate verify     # HEAD-re-verify; --full lists the bucket and reconciles
+python -m s3migrate list-files # query: --name --path --ext --status --min-size --json
+```
+
+Common flags: `--env-file`, `--db`, `--source`, `--prefix`, `--exclude`
+(repeatable fnmatch on relative path or basename). Upload flags:
+`--batch-files N` (0 = unlimited), `--max-workers`, `--multipart-threshold`,
+`--multipart-chunk` (MiB), `--verify size|checksum|readback`, `--overwrite`,
+`--dir-markers`, `--no-scan`.
+
+Exit codes: `0` ok · `1` finished with failures/discrepancies · `2` systemic
+(auth, bucket, missing drive, config) · `3` lock held by another instance.
+
+## Batches, resume, verification
+
+- **Batch** = N *newly verified* files per run (proposal semantics), gated so
+  a batch of N never completes more than N. Failures don't consume budget and
+  are retried on the next run.
+- **Resume**: every state transition is committed to SQLite
+  (`discovered → uploading → uploaded → verified`, plus `failed` and
+  `changed`). Kill the process at any point; `resume` re-checks anything not
+  `verified`. An interrupted multipart upload restarts that file from byte 0
+  (file-level resume). Add an S3 lifecycle rule aborting incomplete multipart
+  uploads after ~7 days.
+- **Changed sources**: a rescan re-marks files whose size/mtime moved as
+  `changed` (verification cleared, re-uploaded); files are also stat-checked
+  immediately before and after their upload.
+- **Verification** (`--verify checksum`, default): local SHA-256 recorded for
+  every file; single-part uploads compared against S3's stored whole-object
+  SHA-256; multipart parts are SHA-256-validated by S3 in transit and the
+  composite checksum recorded — multipart ETags/composites are **never**
+  treated as whole-file hashes. `readback` re-downloads and re-hashes
+  everything (strongest, costs egress). `verify --full --sample-hash N` does
+  an independent listing comparison plus sampled read-back hashing.
+
+## The registry (for the exploration bot)
+
+SQLite file (default `registry.sqlite3` — keep it **off** the external drive;
+back it up occasionally). Tables: `sources`, `directories`, `files`,
+`special_entries`, `upload_jobs`, `upload_attempts` (see
+`s3migrate/migrations/0001_initial.sql`). The `registry` view is the stable
+query surface:
+
+```sql
+SELECT s3_uri, size FROM registry WHERE extension = 'pdf' AND status = 'verified';
+SELECT * FROM registry WHERE relpath LIKE 'Clients/%' ORDER BY size DESC LIMIT 20;
+```
+
+Programmatic access: `Repository(path).list_files(...)` or
+`python -m s3migrate list-files --ext pdf --json`. No credentials are ever
+stored in the registry, so it is safe to hand to other tools.
+
+**PostgreSQL**: `repository.py` is the single SQL boundary — port it to
+psycopg when multiple workers/services need concurrent access. Until then
+`make pg-load PG_DSN=...` mirrors the registry view into a `s3_registry`
+table for SQL access from the DCH stack.
+
+## dch-scripts proof of concept
+
+```bash
+make poc-scan        # counts, bytes, extension breakdown
+make poc-dry-run     # poc-manifest.csv with every destination key
+make poc-upload ARGS='--batch-files 0'
+make poc-verify      # full reconcile + sampled read-back hashes
+make poc-clean       # remove the poc/ prefix + local poc files
+```
+
+The POC uses `--db registry-poc.sqlite3` and prefix `poc/dch-scripts/` so it
+never mixes with the real drive migration.
+
+## The real 1 TB run
+
+1. Plug in the drive; set `SOURCE_DIR` (`/Volumes/Drive` or `E:\`) and a
+   dedicated `S3_PREFIX` in `.env`. Freeze writes to the drive.
+2. `python -m s3migrate dry-run` — sanity-check counts and keys.
+3. Pilot: `python -m s3migrate upload --batch-files 10`, inspect `status`.
+4. Full run: `upload --batch-files 0`. Keep the machine awake:
+   macOS `caffeinate -i ...` (the `make upload` target does this);
+   Windows: Settings → Power → never sleep on AC (or
+   `powercfg /change standby-timeout-ac 0`), and use a powered USB port.
+5. Interruptions are safe — `resume` continues; verified files are never
+   re-sent. Watch progress with `status`.
+6. Sign-off: `upload --batch-files 0` ends clean, then
+   `verify --full --sample-hash 25` exits 0. Keep the drive until a restore
+   test passes.
+
+Throughput reality check: 1 TB ≈ 22 h at a sustained 100 Mbps; extrapolate
+from the pilot's verified-bytes-per-hour, not the line rate.
