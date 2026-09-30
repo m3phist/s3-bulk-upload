@@ -12,6 +12,20 @@ import os
 import sys
 from datetime import datetime
 
+try:
+    import boto3  # noqa: F401 — dependency check before the real imports
+except ImportError:
+    _venv = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv",
+        "Scripts" if os.name == "nt" else "bin", "python")
+    sys.exit(
+        f"boto3 is not installed in this Python ({sys.executable}).\n"
+        "Run the tool with the project venv instead:\n"
+        f"  {_venv} -m s3migrate ...\n"
+        "or activate it first (macOS/Linux: `source .venv/bin/activate`, "
+        "Windows: `.venv\\Scripts\\activate`).\n"
+        "No .venv yet? Create it — README section 1 (`make install`).")
+
 from . import locking
 from .config import ConfigError, build_settings
 from .repository import Repository
